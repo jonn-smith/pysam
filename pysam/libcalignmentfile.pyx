@@ -723,6 +723,11 @@ cdef class AlignmentFile(HTSFile):
         Number of threads to use for compressing/decompressing BAM/CRAM files.
         Setting threads to > 1 cannot be combined with `ignore_truncation`.
         (Default=1)
+
+    override_read_header: bool
+        Override the header when reading a file with the given header.  If
+        override_read_header is True and no header is given, will attempt
+        to read the header from the input file.
     """
 
     def __cinit__(self, *args, **kwargs):
@@ -796,7 +801,8 @@ cdef class AlignmentFile(HTSFile):
               duplicate_filehandle=True,
               ignore_truncation=False,
               format_options=None,
-              threads=1):
+              threads=1,
+              override_read_header=False):
         '''open a sam, bam or cram formatted file.
 
         If _open is called on an existing file, the current file
@@ -950,34 +956,55 @@ cdef class AlignmentFile(HTSFile):
 
             self.check_truncation(ignore_truncation)
 
-            # bam/cram files require a valid header
-            if self.is_bam or self.is_cram:
-                with nogil:
-                    hdr = sam_hdr_read(self.htsfile)
-                if hdr == NULL:
-                    raise ValueError(
-                        "file does not have a valid header (mode='%s') "
-                        "- is it BAM/CRAM format?" % mode)
-                self.header = makeAlignmentHeader(hdr)
-            else:
-                # in sam files a header is optional. If not given,
-                # user may provide reference names and lengths to built
-                # an on-the-fly header.
-                if reference_names and reference_lengths:
-                    # build header from a target names and lengths
+            if override_read_header:
+                if template:
+                    # header is copied, though at the moment not strictly
+                    # necessary as AlignmentHeader is immutable.
+                    self.header = template.header.copy()
+                elif isinstance(header, AlignmentHeader):
+                    self.header = header.copy()
+                elif isinstance(header, Mapping):
+                    self.header = AlignmentHeader.from_dict(header)
+                elif reference_names and reference_lengths:
                     self.header = AlignmentHeader.from_references(
-                        reference_names=reference_names,
-                        reference_lengths=reference_lengths,
+                        reference_names,
+                        reference_lengths,
                         add_sq_text=add_sq_text,
                         text=text)
+                elif text:
+                    self.header = AlignmentHeader.from_text(text)
                 else:
+                    warnings.warn("Unable to create header from given data.  Falling back to parsing header from file.")
+
+            # bam/cram files require a valid header
+            if not self.header:
+                if self.is_bam or self.is_cram:
                     with nogil:
                         hdr = sam_hdr_read(self.htsfile)
                     if hdr == NULL:
                         raise ValueError(
-                            "SAM? file does not have a valid header (mode='%s'), "
-                            "please provide reference_names and reference_lengths")
+                            "file does not have a valid header (mode='%s') "
+                            "- is it BAM/CRAM format?" % mode)
                     self.header = makeAlignmentHeader(hdr)
+                else:
+                    # in sam files a header is optional. If not given,
+                    # user may provide reference names and lengths to built
+                    # an on-the-fly header.
+                    if reference_names and reference_lengths:
+                        # build header from a target names and lengths
+                        self.header = AlignmentHeader.from_references(
+                            reference_names=reference_names,
+                            reference_lengths=reference_lengths,
+                            add_sq_text=add_sq_text,
+                            text=text)
+                    else:
+                        with nogil:
+                            hdr = sam_hdr_read(self.htsfile)
+                        if hdr == NULL:
+                            raise ValueError(
+                                "SAM? file does not have a valid header (mode='%s'), "
+                                "please provide reference_names and reference_lengths")
+                        self.header = makeAlignmentHeader(hdr)
 
             # set filename with reference sequences
             if self.is_cram and reference_filename:
